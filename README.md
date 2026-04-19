@@ -38,57 +38,14 @@ ln -s /path/to/ccsession/skill ~/.claude/skills/ccsession
 
 ### 通过 Skill 调用
 
-| 命令 | 说明 |
-|---|---|
-| `/ccsession list [--project <path>]` | 表格列出所有会话 |
-| `/ccsession show <sessionId>` | 会话详情（默认展示前 3 步） |
-| `/ccsession show <sessionId> --full` | 会话详情（展示全部步骤） |
-| `/ccsession delete <sessionId>` | 删除会话 .jsonl（需确认） |
+| 命令                                   | 说明               |
+| ------------------------------------ | ---------------- |
+| `/ccsession list [--project <path>]` | 表格列出所有会话         |
+| `/ccsession show <sessionId>`        | 会话详情（默认展示前 3 步）  |
+| `/ccsession show <sessionId> --full` | 会话详情（展示全部步骤）     |
+| `/ccsession delete <sessionId>`      | 删除会话 .jsonl（需确认） |
 
 `--project` 缺省时使用当前工作目录。`<sessionId>` 支持完整 UUID 或前缀匹配。
-
-### 示例：`/ccsession list`
-
-
-#### Claude Code 会话摘要 — `/path/to/project`
-
-共 **3** 个会话。
-
-| 会话ID | 模型 | 时间 | 问题摘要 | 首个问题 | AI 执行摘要 | 文件编辑 | Subagent | Token 用量 |
-|---|---|---|---|---|---|---|---|---|
-| a3b370e5 | claude-opus-4-7 | 2026-04-19 19:30:22 → 2026-04-19 20:08:47<br>38m · 14 轮 | 探索 new-api 项目结构并实现认证中间件重构 | 帮我看一下这个项目的结构… | Bash×23 / Read×18 / Edit×12 / Grep×5 | 3 个文件 | - | in:85.2k / out:12.3k / cc:120.5k / cr:2.1m |
-| 63c04f2c | claude-opus-4-7 | 2026-04-19 14:21:05 → 2026-04-19 18:15:33<br>3h54m · 28 轮 | 修复 API 路由注册和添加单元测试 | 路由注册好像有问题… | Bash×45 / Edit×32 / Read×28 / Write×4 | 8 个文件 | 2 个 agent | in:320.6k+15.2k / out:45.8k+3.1k / cc:210.3k+8.4k / cr:5.8m+420.5k |
-| b2cf1a09 | glm-5.1 | 2026-04-18 09:12:40 → 2026-04-18 10:05:18<br>52m · 6 轮 | 配置 Docker 部署环境 | 怎么用 docker 部署… | Bash×8 / Read×5 / Edit×3 | 2 个文件 | - | in:22.1k / out:5.6k / cc:45.0k / cr:380.2k |
-
-**合计 tokens** — input: 427.9k+15.2k / output: 63.7k+3.1k / cache_creation: 375.8k+8.4k / cache_read: 8.3m+420.5k
-
-
-### 示例：`/ccsession show <sessionId>`
-
-#### 会话详情 — `a3b370e5-2c63-42e3-831f-65744c89b44a`
-
-| 会话ID | 模型 | 时间 | 问题摘要 | 首个问题 | AI 执行摘要 | 文件编辑 | Subagent | Token 用量 |
-|---|---|---|---|---|---|---|---|---|
-| a3b370e5 | claude-opus-4-7 | 2026-04-19 19:30:22 → 2026-04-19 20:08:47<br>38m · 14 轮 | 探索 new-api 项目结构并实现认证中间件重构 | 帮我看一下这个项目的结构… | Bash×23 / Read×18 / Edit×12 / Grep×5 | 3 个文件 | - | in:85.2k / out:12.3k / cc:120.5k / cr:2.1m |
-
-##### 用户提问
-1. [plan] 帮我看一下这个项目的结构，特别是认证模块
-2. [acceptEdits] 把 auth middleware 拆分成独立文件
-3. [default] 跑一下测试看看有没有问题
-...
-
-##### 文件编辑 (3 个文件)
-1. middleware/auth.go
-2. routes/api.go
-3. tests/auth_test.go
-
-##### AI 执行步骤
-1. `[19:31:05]` **Read** — middleware/auth.go
-2. `[19:32:18]` **Read** — routes/api.go
-3. `[19:33:42]` **Edit** — middleware/auth.go
-
-_…共 58 步，还有 55 步未展示。加 `--full` 查看全部：`/ccsession show a3b370e5 --full`_
-
 
 ### 直接运行脚本
 
@@ -112,3 +69,51 @@ python3 skill/scripts/delete_session.py --project <path> --session <id> --force 
 ## 依赖
 
 Python 3 标准库，无第三方包。
+
+## 示例
+
+### 示例：`/ccsession list`
+
+
+#### Claude Code 会话摘要 — `/path/to/project`
+
+共 **3** 个会话。
+
+| 会话ID     | 模型              | 时间                                                    | 问题摘要                      | 首个问题           | AI 执行摘要                               | 文件编辑  | Subagent  | Token 用量                                                           |
+| -------- | --------------- | ----------------------------------------------------- | ------------------------- | -------------- | ------------------------------------- | ----- | --------- | ------------------------------------------------------------------ |
+| a3b370e5 | claude-opus-4-7 | 2026-04-19 19:30:22 → 2026-04-19 20:08:4738m · 14 轮   | 探索 new-api 项目结构并实现认证中间件重构 | 帮我看一下这个项目的结构…  | Bash×23 / Read×18 / Edit×12 / Grep×5  | 3 个文件 | -         | in:85.2k / out:12.3k / cc:120.5k / cr:2.1m                         |
+| 63c04f2c | claude-opus-4-7 | 2026-04-19 14:21:05 → 2026-04-19 18:15:333h54m · 28 轮 | 修复 API 路由注册和添加单元测试        | 路由注册好像有问题…     | Bash×45 / Edit×32 / Read×28 / Write×4 | 8 个文件 | 2 个 agent | in:320.6k+15.2k / out:45.8k+3.1k / cc:210.3k+8.4k / cr:5.8m+420.5k |
+| b2cf1a09 | glm-5.1         | 2026-04-18 09:12:40 → 2026-04-18 10:05:1852m · 6 轮    | 配置 Docker 部署环境            | 怎么用 docker 部署… | Bash×8 / Read×5 / Edit×3              | 2 个文件 | -         | in:22.1k / out:5.6k / cc:45.0k / cr:380.2k                         |
+
+**合计 tokens** — input: 427.9k+15.2k / output: 63.7k+3.1k / cache\_creation: 375.8k+8.4k / cache\_read: 8.3m+420.5k
+
+
+### 示例：`/ccsession show <sessionId>`
+
+
+#### 会话详情 — `a3b370e5-2c63-42e3-831f-65744c89b44a`
+
+| 会话ID     | 模型              | 时间                                                  | 问题摘要                      | 首个问题          | AI 执行摘要                              | 文件编辑  | Subagent | Token 用量                                   |
+| -------- | --------------- | --------------------------------------------------- | ------------------------- | ------------- | ------------------------------------ | ----- | -------- | ------------------------------------------ |
+| a3b370e5 | claude-opus-4-7 | 2026-04-19 19:30:22 → 2026-04-19 20:08:4738m · 14 轮 | 探索 new-api 项目结构并实现认证中间件重构 | 帮我看一下这个项目的结构… | Bash×23 / Read×18 / Edit×12 / Grep×5 | 3 个文件 | -        | in:85.2k / out:12.3k / cc:120.5k / cr:2.1m |
+
+##### 用户提问
+
+1. \[plan] 帮我看一下这个项目的结构，特别是认证模块
+2. \[acceptEdits] 把 auth middleware 拆分成独立文件
+3. \[default] 跑一下测试看看有没有问题
+   ...
+
+##### 文件编辑 (3 个文件)
+
+1. middleware/auth.go
+2. routes/api.go
+3. tests/auth\_test.go
+
+##### AI 执行步骤
+
+1. `[19:31:05]` **Read** — middleware/auth.go
+2. `[19:32:18]` **Read** — routes/api.go
+3. `[19:33:42]` **Edit** — middleware/auth.go
+
+_…共 58 步，还有 55 步未展示。加_ _`--full`_ _查看全部：`/ccsession show a3b370e5 --full`_
