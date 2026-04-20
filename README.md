@@ -47,6 +47,10 @@ ln -s /path/to/ccsession/skill ~/.claude/skills/ccsession
 
 `--project` 缺省时使用当前工作目录。`<sessionId>` 支持完整 UUID 或前缀匹配。
 
+**路径编码规则**：项目路径中的 `/` 和 `_` 会被替换为 `-`，用于匹配 `~/.claude/projects/` 下的目录名。例如：
+- `/home/user/my_project` → `-home-user-my-project`
+- `/home/user/project/my_app` → `-home-user-project-my-app`
+
 ### 直接运行脚本
 
 ```bash
