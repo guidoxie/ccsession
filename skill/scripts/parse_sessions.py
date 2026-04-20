@@ -19,7 +19,7 @@ CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 def encode_project_path(abs_path: str) -> str:
     p = Path(abs_path).expanduser().resolve()
-    return str(p).replace("/", "-")
+    return str(p).replace("/", "-").replace("_", "-")
 
 
 def project_dir(abs_path: str) -> Path:
