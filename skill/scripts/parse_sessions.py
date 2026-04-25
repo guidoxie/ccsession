@@ -60,6 +60,7 @@ class SessionStats:
     end: str = ""
     user_turns: int = 0
     first_question: str = ""
+    last_question: str = ""
     all_questions: list[str] = field(default_factory=list)
     question_modes: list[str] = field(default_factory=list)
     tool_counts: dict[str, int] = field(default_factory=dict)
@@ -171,6 +172,7 @@ def aggregate(path: Path) -> SessionStats:
                     s.question_modes.append(rec.get("permissionMode", "default"))
                     if not s.first_question:
                         s.first_question = q[:80] + ("…" if len(q) > 80 else "")
+                    s.last_question = q[:80] + ("…" if len(q) > 80 else "")
         elif t == "assistant":
             req_id = rec.get("requestId")
             if req_id and req_id in seen_requests:
@@ -436,6 +438,7 @@ def main() -> int:
                     "all_questions": [q[:200] + ("…" if len(q) > 200 else "") for q in s.all_questions],
                     "question_modes": s.question_modes,
                     "first_question": s.first_question,
+                    "last_question": s.last_question,
                     "tool_counts": s.tool_counts,
                     "tokens": s.tokens,
                     "subagents": s.subagents,
@@ -474,6 +477,7 @@ def main() -> int:
             "all_questions": [q[:200] + ("…" if len(q) > 200 else "") for q in stats.all_questions],
             "question_modes": stats.question_modes,
             "first_question": stats.first_question,
+            "last_question": stats.last_question,
             "tool_counts": stats.tool_counts,
             "steps": [{"ts": st.ts, "name": st.name, "detail": st.detail}
                        for st in (stats.steps if args.full else stats.steps[:3])],

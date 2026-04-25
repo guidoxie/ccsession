@@ -42,7 +42,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/delete_session.py"  --project <路径> --se
 
 每个会话渲染为一行，列为：
 
-`| 会话ID | 模型 | 时间 | 问题摘要 | 首个问题 | AI 执行摘要 | 文件编辑 | Subagent | Token 用量 |`
+`| 会话ID | 模型 | 时间 | 问题摘要 | 首个问题 | 最后问题 | AI 执行摘要 | 文件编辑 | Subagent | Token 用量 |`
 
 各列取值规则：
 
@@ -53,6 +53,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/delete_session.py"  --project <路径> --se
 | 时间 | `start` `end` `duration` `user_turns` | `{start本地时间} → {end本地时间} · {duration} · {turns} 轮` |
 | 问题摘要 | `all_questions` → **AI 生成** | 一句中文 ≤60 字，综合所有提问归纳 |
 | 首个问题 | `first_question` | 原样，末尾加 `…` |
+| 最后问题 | `last_question` | 原样，末尾加 `…` |
 | AI 执行摘要 | `tool_counts` | 按次数降序：`Edit×27 / Read×24 / Bash×23` |
 | 文件编辑 | `files_edited` | `{N} 个文件`（N 为 `len(files_edited)`）；无编辑时显示 `-` |
 | Subagent | `subagents` `subagent_tokens` | `{N} 个 agent`；无 subagent 时显示 `-` |
@@ -75,9 +76,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/delete_session.py"  --project <路径> --se
    ```
    # 会话详情 — `{session_id}`
 
-   | 会话ID | 模型 | 时间 | 问题摘要 | 首个问题 | AI 执行摘要 | 文件编辑 | Subagent | Token 用量 |
-   |---|---|---|---|---|---|---|---|---|
-   | 927d520f | ... | ... | ... | ... | ... | ... | ... | ... |
+   | 会话ID | 模型 | 时间 | 问题摘要 | 首个问题 | 最后问题 | AI 执行摘要 | 文件编辑 | Subagent | Token 用量 |
+   |---|---|---|---|---|---|---|---|---|---|
+   | 927d520f | ... | ... | ... | ... | ... | ... | ... | ... | ... |
    ```
 4. **第二部分：API 错误**（仅当 `api_errors > 0` 时展示）
    ```
