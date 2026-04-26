@@ -65,7 +65,7 @@ class SessionStats:
     first_question: str = ""
     last_question: str = ""
     last_prompt: str = ""  # 来自 type==last-prompt 条目的 lastPrompt（比尾部 user 行更准）
-    raw_summary: str = ""  # 来自 type==summary 条目（旧版 /compact 兜底，多数为空）
+    raw_summary: str = ""  # /compact 留下的"前序会话整体压缩"（type==user + isCompactSummary）
     commits: list[dict] = field(default_factory=list)  # [{"hash","subject"}]，会话期间 cwd 的 commits
     tool_counts: dict[str, int] = field(default_factory=dict)
     steps: list[Step] = field(default_factory=list)
@@ -76,6 +76,7 @@ class SessionStats:
     # 注：token 去重依赖 requestId，无 requestId 的 assistant 记录会被重复计数（影响 <1%）
     models: set[str] = field(default_factory=set)
     # Subagent
+    subagents: list[dict] = field(default_factory=list)  # [{"type","desc","tokens"}]
     subagent_count: int = 0
     subagent_tokens: dict[str, int] = field(
         default_factory=lambda: {"in": 0, "out": 0, "cc": 0, "cr": 0}
@@ -162,11 +163,13 @@ def aggregate(path: Path) -> SessionStats:
         if t == "system" and rec.get("subtype") == "api_error":
             s.api_retries += 1
 
-        # 旧版 /compact 在 jsonl 里写过 type==summary 行；新版未见，但保留兜底
-        if t == "summary":
-            summary_text = rec.get("summary") or ""
-            if summary_text and not s.raw_summary:
-                s.raw_summary = summary_text.strip().replace("\n", " ")[:400]
+        # /compact：上一段会话的整体压缩，写入新会话首条 user 行（type==user + isCompactSummary）
+        # message.content 是长文本，原样留给 AI 作"开场背景"信号
+        if t == "user" and rec.get("isCompactSummary"):
+            msg = rec.get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str) and not s.raw_summary:
+                s.raw_summary = content
 
         # Claude Code 主动落盘的"该会话最后一条用户提示"
         if t == "last-prompt":
@@ -182,8 +185,8 @@ def aggregate(path: Path) -> SessionStats:
                 if is_real_question(q):
                     s.user_turns += 1
                     if not s.first_question:
-                        s.first_question = q[:80] + ("…" if len(q) > 80 else "")
-                    s.last_question = q[:80] + ("…" if len(q) > 80 else "")
+                        s.first_question = q
+                    s.last_question = q
         elif t == "assistant":
             req_id = rec.get("requestId")
             if req_id and req_id in seen_requests:
@@ -218,7 +221,7 @@ def aggregate(path: Path) -> SessionStats:
                         s.tool_counts[f"ServerTool[{sname}]"] = s.tool_counts.get(f"ServerTool[{sname}]", 0) + 1
 
     # Subagent analysis
-    s.subagent_count, s.subagent_tokens = _analyze_subagents(path.parent, s.session_id)
+    s.subagents, s.subagent_count, s.subagent_tokens = _analyze_subagents(path.parent, s.session_id)
     # 会话期间 cwd 内的 git commits（最权威的"做了什么"信号）
     fetch_commits_from_git(s)
     return s
@@ -247,11 +250,11 @@ def fetch_commits_from_git(stats: SessionStats) -> None:
             stats.commits.append({"hash": h, "subject": subj[:120]})
 
 
-def _analyze_subagents(session_dir: Path, session_id: str) -> tuple[int, dict[str, int]]:
+def _analyze_subagents(session_dir: Path, session_id: str) -> tuple[list[dict], int, dict[str, int]]:
     sub_dir = session_dir / session_id / "subagents"
     if not sub_dir.is_dir():
-        return 0, {"in": 0, "out": 0, "cc": 0, "cr": 0}
-    count = 0
+        return [], 0, {"in": 0, "out": 0, "cc": 0, "cr": 0}
+    agents: list[dict] = []
     totals = {"in": 0, "out": 0, "cc": 0, "cr": 0}
     for meta_file in sorted(sub_dir.glob("agent-*.meta.json")):
         try:
@@ -278,10 +281,14 @@ def _analyze_subagents(session_dir: Path, session_id: str) -> tuple[int, dict[st
                 agent_tokens["out"] += u.get("output_tokens", 0) or 0
                 agent_tokens["cc"] += u.get("cache_creation_input_tokens", 0) or 0
                 agent_tokens["cr"] += u.get("cache_read_input_tokens", 0) or 0
-        count += 1
+        agents.append({
+            "type": meta.get("agentType", "?"),
+            "desc": meta.get("description", ""),
+            "tokens": agent_tokens,
+        })
         for k in totals:
             totals[k] += agent_tokens[k]
-    return count, totals
+    return agents, len(agents), totals
 
 
 def summary_line(tc: dict[str, int]) -> str:
@@ -401,9 +408,26 @@ def render_detail(s: SessionStats, full: bool = False, step_preview: int = 3) ->
             commit_line += f" …(+{len(s.commits) - 5})"
         out.append(f"- **本会话提交**: {commit_line}")
     if s.last_prompt:
-        lp = s.last_prompt if len(s.last_prompt) <= 200 else s.last_prompt[:200] + "…"
-        out.append(f"- **最后提示**: {lp}")
+        out.append(f"- **最后提示**: {s.last_prompt}")
     out.append("")
+
+    if s.subagents:
+        out.append(f"## Subagent ({len(s.subagents)} 个)")
+        out.append("")
+        out.append("| Agent 类型 | 描述 | Token 用量 |")
+        out.append("|---|---|---|")
+        for a in s.subagents:
+            tk = a["tokens"]
+            tok = f"in:{tk['in']:,} / out:{tk['out']:,}"
+            if tk.get("cc"):
+                tok += f" / cc:{tk['cc']:,}"
+            if tk.get("cr"):
+                tok += f" / cr:{tk['cr']:,}"
+            desc = a.get("desc", "")
+            if len(desc) > 60:
+                desc = desc[:60] + "…"
+            out.append(f"| {a['type']} | {md_escape(desc)} | {tok} |")
+        out.append("")
 
     out.append("## AI 执行步骤")
     if not s.steps:
@@ -439,6 +463,7 @@ def _session_to_dict(s: SessionStats, detail: bool = False, full: bool = False) 
         "commits": s.commits,
         "tool_counts": s.tool_counts,
         "tokens": s.tokens,
+        "subagents": s.subagents,
         "subagent_count": s.subagent_count,
         "subagent_tokens": s.subagent_tokens,
         "api_errors": s.api_errors,

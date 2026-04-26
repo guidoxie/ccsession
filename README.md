@@ -6,7 +6,7 @@
 
 - **列表**：表格展示所有会话，包含会话ID、模型、时间、会话摘要、首个问题、最后提示、AI 执行摘要、文件编辑、Subagent、Token 用量等
 - **详情**：单行摘要 + API 错误（如有）+ 本会话提交 + 文件编辑 + Subagent + AI 执行步骤
-- **会话摘要新流水线（事实优先，AI 兜底）**：脚本从 jsonl 抽 `last_prompt`、用 `git log --since/--until` 抽本会话期间 cwd 的 commits（最权威信号），AI 只按 `raw_summary → commits → last_prompt → 首末问题` 优先级一行润色（≤60 字），不再单纯综合用户问题列表
+- **会话摘要流水线（事实优先，AI 综合）**：脚本从 jsonl 抽 `last_prompt`、用 `git log --since/--until` 抽本会话期间 cwd 的 commits（最权威信号）、`isCompactSummary` 行抽 `/compact` 留下的前序会话压缩；AI 按 SKILL.md 中"会话摘要 Prompt 模板"综合 `commits → last_prompt → 首末问题 → raw_summary` 生成一句中文摘要，**不限字数**，要求包含所有关键产出或核心意图
 - **删除**：两步确认删除会话 `.jsonl` 文件
 - **排序**：列表支持按开始时间、结束时间、轮次、时长排序
 - **Token 统计**：主会话 + Subagent 分开展示，支持 k/m/g 单位
@@ -126,6 +126,13 @@ Python 3 标准库，无第三方包。
 1. middleware/auth.go
 2. routes/api.go
 3. tests/auth\_test.go
+
+##### Subagent (2 个)
+
+| Agent 类型 | 描述 | Token 用量 |
+| ------- | ----------- | -------------------- |
+| Explore | 探索现有 auth 结构 | in:12,345 / out:3,456 |
+| Plan    | 设计中间件拆分方案   | in:8,901 / out:2,345  |
 
 ##### AI 执行步骤
 
