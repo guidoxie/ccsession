@@ -7,7 +7,7 @@
 - **列表**：表格展示所有会话，包含会话ID、模型、时间、会话摘要、首个问题、最后提示、AI 执行摘要、文件编辑、Subagent、Token 用量等
 - **详情**：单行摘要 + API 错误（如有）+ 本会话提交 + 文件编辑 + Subagent + AI 执行步骤
 - **会话摘要流水线（事实优先，AI 综合）**：脚本从 jsonl 抽 `last_prompt`、用 `git log --since/--until` 抽本会话期间 cwd 的 commits（最权威信号）、`isCompactSummary` 行抽 `/compact` 留下的前序会话压缩；AI 按 SKILL.md 中"会话摘要 Prompt 模板"综合 `commits → last_prompt → 首末问题 → raw_summary` 生成一句中文摘要，**不限字数**，要求包含所有关键产出或核心意图
-- **摘要持久化缓存**：会话写完 jsonl 后内容不再变，AI 摘要可以无限期复用；脚本读 `.ccsession_cache.json` 按 `sessionId + jsonl mtime + size` 三段命中；命中即用、未命中由 AI 现场生成并通过 `cache_summary.py --bulk` 回写；活跃项目第二次跑 list 几乎瞬时
+- **持久化缓存（schema v2）**：`.ccsession_cache.json` 缓存**完整 session_dict**——命中时脚本根本不调 `aggregate()`（不读 jsonl、不跑 `git log`、不扫 subagent 目录），活跃项目第二次跑 list 脚本侧成本压成 0；AI 摘要层独立维护，cached_summary 经 `cache_summary.py --bulk` 写回；本机 new-api 10 会话 cold 228ms → warm 67ms（≈3.4x）
 - **删除**：两步确认删除会话 `.jsonl` 与该会话独有的同名 sessionId 子目录（subagent + tool-results 缓存），项目级共享目录（`memory/`、`todos/`、`shellsnapshots/`、`.ccsession_cache.json`）红线保留；附 `clean-orphan-dirs` 子命令清理历史遗留的孤儿子目录
 - **排序**：列表支持按开始时间、结束时间、轮次、时长排序
 - **Token 统计**：主会话 + Subagent 分开展示，支持 k/m/g 单位
@@ -155,7 +155,8 @@ _…共 58 步，还有 55 步未展示。加_ _`--full`_ _查看全部：`/ccse
 
 | 日期 | 变更类型 | 变更描述 |
 |---|---|---|
-| 2026-04-27 | 性能优化 | list/show AI 摘要持久化缓存：脚本读 `{project_dir}/.ccsession_cache.json`，按 `sessionId + jsonl mtime + size` 三段命中，命中则在 JSON 附 `cached_summary` 成品文本由 AI 直接塞进表格；未命中由 AI 现场生成并通过新增的 `cache_summary.py --bulk` 回写；`delete_session.py` 删 jsonl 时同步清条目；活跃项目第二次起几乎瞬时，消除多会话项目下 AI 摘要的瓶颈 |
+| 2026-04-27 | 性能优化 | 缓存升级 v2：`.ccsession_cache.json` 现在缓存**完整 session_dict**（含 tokens / tool_counts / files_edited / subagent / commits / cached_summary 等全部字段）；命中时 `parse_sessions.py` **根本不调 aggregate()**——不读 jsonl、不跑 `git log`、不扫 subagent 目录；未命中那批走并发 aggregate + 收尾批量回填；脚本侧成本压成 0（new-api 10 会话 cold 228ms → warm 67ms ≈3.4x）；旧 v1 schema 自动废弃重建；AI 摘要层维持原行为（`cache_summary.py --bulk` 只更新 entry.cached_summary） |
+| 2026-04-27 | 性能优化 | list/show AI 摘要持久化缓存（v1）：脚本读 `{project_dir}/.ccsession_cache.json`，按 `sessionId + jsonl mtime + size` 三段命中，命中则在 JSON 附 `cached_summary` 成品文本由 AI 直接塞进表格；未命中由 AI 现场生成并通过新增的 `cache_summary.py --bulk` 回写；`delete_session.py` 删 jsonl 时同步清条目；活跃项目第二次起几乎瞬时，消除多会话项目下 AI 摘要的瓶颈 |
 | 2026-04-26 | 用户体验 | list/show 表格三列排版优化：会话摘要首句加粗作小标题 + 冒号叙述；首个问题 / 最后提示用「」中文引号包裹原文，AI 总结与用户原话视觉区分 |
 | 2026-04-26 | 用户体验 | `list` 默认按 `end DESC → user_turns DESC → duration DESC` 三级倒序，最近活跃 + 高互动 + 长时段会话排前面；`--sort` 显式传值时回退单键模式，与 `--desc` 配合 |
 | 2026-04-26 | bug 修复 | `delete` 连带删除同名 sessionId 子目录（含该会话独有的 `subagents/` 与 `tool-results/`），避免 subagent / tool-results 残留为孤儿数据；新增 `clean-orphan-dirs` 子命令清理历史遗留；安全断言三道（UUID 正则 + 父目录 + 同名）防误伤项目级共享目录 |

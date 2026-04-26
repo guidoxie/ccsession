@@ -200,16 +200,26 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cache_summary.py"   --project <路径> --bu
 
 ---
 
-## 摘要持久化缓存（list/show 共用）
+## 持久化缓存（list/show 共用，schema v2）
 
-为消除多会话项目下 AI 摘要的瓶颈，脚本会从 `{project_dir}/.ccsession_cache.json` 读取已生成的摘要：按 `sessionId + jsonl mtime + jsonl size` 三段命中。
+`{project_dir}/.ccsession_cache.json` 缓存**完整 session_dict**——含 tokens / tool_counts / files_edited / subagents / commits / first_question / last_prompt / cached_summary 等全部字段。
 
-- 命中 → JSON 中 `cached_summary` 字段为成品文本（已含粗体首句），**直接用、不再加工**。
-- 未命中 → `cached_summary` 为空字符串；按下方 Prompt 模板生成；渲染完成后通过 `cache_summary.py --bulk` 回写。
+**命中规则**：`sessionId + jsonl mtime + jsonl size` 三段一致即命中。命中后脚本**根本不调 `aggregate()`**——不读 jsonl、不跑 `git log`、不扫 subagent 目录；直接把缓存里的 session_dict 排序输出。
 
-**回写脚本约定**：临时 JSON 形如 `{"<sessionId>": "<摘要文本>"}`；脚本会重新 stat 对应 jsonl 取 mtime+size 后写入；不存在 jsonl 的 sessionId 会被静默跳过。回写后删除临时文件。
+**两层缓存**：
 
-**缓存淘汰**：删除 session 时（`delete_session.py`）同步清条目；list/show 路径只读不写；mtime/size 不一致自动判 miss 触发重算。**绝不在 list 路径里清孤儿条目**（避免读路径写副作用）。
+1. **Session-dict 层**（`parse_sessions.py` 自动维护）：list 时分流命中 / 未命中，未命中那批走并发 `aggregate()`，**收尾批量** `backfill_session_dicts()` 写回 entry。脚本侧成本压成 0（命中场景）。
+2. **AI 摘要层**（AI 维护）：脚本不会自己生成"会话摘要"；命中 entry 但 `cached_summary` 为空时，AI 按下方 Prompt 模板现场生成 + 通过 `cache_summary.py --bulk` 单独回写到 `entries.<sid>.session_dict.cached_summary`。
+
+**回写约定**（仅 AI 摘要层）：临时 JSON 形如 `{"<sessionId>": "<摘要文本>"}`；`cache_summary.py --bulk` 只更新已有 entry 的 `cached_summary` 字段，entry 不存在时一律 skip（脚本会在 list 收尾自动建 entry，所以这种情况罕见）。回写后删除临时文件。
+
+**缓存淘汰**：
+- 单条失效：jsonl mtime/size 与 entry 不一致 → cache miss → 触发 `aggregate()` + 全量替换 entry。
+- 全量失效：cache 文件 `version != 2`、文件损坏、`entries` 形状不对 → 一律视作空缓存重建。
+- 删除会话：`delete_session.py` 删 jsonl 时同步调 `cache_summary.purge_entry()` 清条目。
+- **绝不在 list 路径里清孤儿条目**（避免读路径写副作用；孤儿 entry 在 jsonl 重新出现或 delete 时自然处理）。
+
+**为什么不缓存 markdown 行**：AI 必须把表格 emit 在文本回复里（Bash stdout 在 Claude Code 里渲染成 monospace 代码块、不变真表格），row markdown 缓存只省 AI 思考成本、不省字符 emission；且 SKILL.md 格式变更需要 render_version 全量失效，性价比低。
 
 ## 会话摘要 Prompt 模板
 

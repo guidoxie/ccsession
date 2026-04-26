@@ -462,10 +462,11 @@ def _duration_secs(s: SessionStats) -> float:
     return max(0.0, (b - a).total_seconds())
 
 
-def _load_cache(project_root: Path) -> dict:
-    """读 .ccsession_cache.json，文件不存在/损坏返回空 summaries。
+def _load_cache_entries(project_root: Path) -> dict:
+    """读 .ccsession_cache.json 的 entries 映射（v2 schema）。
 
-    list 路径只读，不在这里清孤儿条目（避免读路径写副作用）。
+    文件不存在 / 损坏 / 版本不符 → 返回空 dict。list 路径只读不写孤儿条目；
+    脚本侧背填走 backfill_session_dicts() 在 list 收尾批量执行。
     """
     p = project_root / CACHE_FILENAME
     if not p.is_file():
@@ -476,27 +477,66 @@ def _load_cache(project_root: Path) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    summaries = data.get("summaries")
-    if not isinstance(summaries, dict):
+    if data.get("version") != 2:
         return {}
-    return summaries
+    entries = data.get("entries")
+    return entries if isinstance(entries, dict) else {}
 
 
-def _cache_lookup(cache: dict, jsonl_path: Path) -> str:
-    """按 sessionId + mtime + size 三段命中判定，命中返回缓存的摘要文本。"""
-    if not cache:
-        return ""
-    entry = cache.get(jsonl_path.stem)
+def _cache_lookup_dict(entries: dict, jsonl_path: Path) -> dict | None:
+    """按 sessionId + mtime + size 三段命中判定。
+
+    命中：返回 entry["session_dict"] 的副本（避免上层修改污染缓存）。
+    未命中：返回 None。
+    """
+    if not entries:
+        return None
+    entry = entries.get(jsonl_path.stem)
     if not isinstance(entry, dict):
-        return ""
+        return None
     try:
         st = jsonl_path.stat()
     except OSError:
-        return ""
+        return None
     if entry.get("mtime") != st.st_mtime or entry.get("size") != st.st_size:
-        return ""
-    summary = entry.get("summary")
-    return summary if isinstance(summary, str) else ""
+        return None
+    sdict = entry.get("session_dict")
+    if not isinstance(sdict, dict):
+        return None
+    # 浅拷贝即可——上层只读 + 排序，不修改嵌套结构
+    return dict(sdict)
+
+
+def _duration_secs_dict(d: dict) -> float:
+    """会话时长（秒），dict 版本——给缓存命中后的排序用。"""
+    start, end = d.get("start") or "", d.get("end") or ""
+    if not (start and end):
+        return 0.0
+    try:
+        a = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        b = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    return max(0.0, (b - a).total_seconds())
+
+
+def _sort_dicts(rows: list[dict], sort_field: str | None, desc: bool) -> list[dict]:
+    """按 SessionStats 时代相同的语义对 dict 列表排序。"""
+    if sort_field is None:
+        # 默认多键全 DESC：end → user_turns → duration
+        rows.sort(
+            key=lambda d: (d.get("end") or "", d.get("user_turns") or 0, _duration_secs_dict(d)),
+            reverse=True,
+        )
+        return rows
+
+    def single_key(d: dict):
+        if sort_field == "turns":    return d.get("user_turns") or 0
+        if sort_field == "duration": return _duration_secs_dict(d)
+        if sort_field == "end":      return d.get("end") or ""
+        return d.get("start") or ""
+    rows.sort(key=single_key, reverse=desc)
+    return rows
 
 
 def _aggregate_safe(path: Path) -> SessionStats:
@@ -585,30 +625,66 @@ def main() -> int:
         print(f"（对应项目路径：{args.project}）")
         return 0
 
-    cache = _load_cache(pdir)
+    entries = _load_cache_entries(pdir)
 
     if args.mode == "summary":
-        rows = _aggregate_all(files, args.workers)
+        if args.format == "json":
+            # 缓存优先：分流命中 / 未命中
+            cached_dicts: dict[str, dict] = {}
+            miss_paths: list[Path] = []
+            for path in files:
+                sdict = _cache_lookup_dict(entries, path)
+                if sdict is not None:
+                    cached_dicts[path.stem] = sdict
+                else:
+                    miss_paths.append(path)
 
+            # 仅 miss 子集走并发 aggregate
+            miss_stats = _aggregate_all(miss_paths, args.workers) if miss_paths else []
+
+            # 构造 path → dict 映射；未命中转 dict 时 cached_summary 留空（待 AI 现场生成）
+            sdict_by_stem: dict[str, dict] = dict(cached_dicts)
+            backfill_items: dict[str, dict] = {}
+            for path, stats in zip(miss_paths, miss_stats):
+                d = _session_to_dict(stats, cached_summary="")
+                sdict_by_stem[path.stem] = d
+                try:
+                    st = path.stat()
+                    backfill_items[path.stem] = {
+                        "mtime": st.st_mtime,
+                        "size": st.st_size,
+                        "session_dict": d,
+                    }
+                except OSError:
+                    pass
+
+            # 按 find_sessions 原顺序铺开，再按 sort 规则排序
+            rows = [sdict_by_stem[p.stem] for p in files if p.stem in sdict_by_stem]
+            rows = _sort_dicts(rows, args.sort, args.desc)
+
+            # 先批量回填脚本侧缓存（保证 AI 后续 cache_summary --bulk 时 entry 已存在），再 print
+            if backfill_items:
+                try:
+                    from cache_summary import backfill_session_dicts as _backfill  # noqa: E402
+                    _backfill(pdir, backfill_items)
+                except Exception as e:
+                    print(f"[warn] cache backfill failed: {e}", file=sys.stderr)
+
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
+
+        # markdown 兜底路径：不走 dict 缓存（fallback 仅用于命令行调试）
+        rows_stats = _aggregate_all(files, args.workers)
         if args.sort is None:
-            # 默认多键全 DESC：end → user_turns → duration
-            # 设计动机：用户最常关心"最近活跃 + 互动密度高 + 跑得久"的会话排前面
-            rows.sort(key=lambda s: (s.end or "", s.user_turns, _duration_secs(s)), reverse=True)
+            rows_stats.sort(key=lambda s: (s.end or "", s.user_turns, _duration_secs(s)), reverse=True)
         else:
             def single_key(s: SessionStats):
                 if args.sort == "turns":    return s.user_turns
                 if args.sort == "duration": return _duration_secs(s)
                 if args.sort == "end":      return s.end or ""
                 return s.start or ""
-            rows.sort(key=single_key, reverse=args.desc)
-        if args.format == "json":
-            data = [
-                _session_to_dict(s, cached_summary=_cache_lookup(cache, pdir / f"{s.session_id}.jsonl"))
-                for s in rows
-            ]
-            print(json.dumps(data, ensure_ascii=False, indent=2))
-        else:
-            print(render_summary(args.project, rows))
+            rows_stats.sort(key=single_key, reverse=args.desc)
+        print(render_summary(args.project, rows_stats))
         return 0
 
     if not args.session:
@@ -620,11 +696,18 @@ def main() -> int:
         for f in files[:5]:
             print(f"  - {f.stem}")
         return 1
+
+    # detail 模式：始终跑 aggregate（要 steps），但读取已存 entry 中的 cached_summary 复用
     stats = aggregate(target)
+    cached_sum = ""
+    cached_entry_dict = _cache_lookup_dict(entries, target)
+    if cached_entry_dict is not None:
+        cs = cached_entry_dict.get("cached_summary")
+        if isinstance(cs, str):
+            cached_sum = cs
     if args.format == "json":
         detail_data = _session_to_dict(
-            stats, detail=True, full=args.full,
-            cached_summary=_cache_lookup(cache, target),
+            stats, detail=True, full=args.full, cached_summary=cached_sum,
         )
         print(json.dumps(detail_data, ensure_ascii=False, indent=2))
     else:

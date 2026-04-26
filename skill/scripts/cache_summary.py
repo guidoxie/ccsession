@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Write AI-generated session summaries into the per-project cache file.
+"""Persistent cache for parse_sessions.py + AI summary writeback.
 
-缓存文件：{project_dir}/.ccsession_cache.json
+缓存文件：{project_dir}/.ccsession_cache.json （schema v2）
 结构：
     {
-      "version": 1,
-      "summaries": {
+      "version": 2,
+      "entries": {
         "<sessionId>": {
           "mtime": 1745712345.123,
           "size": 12345,
-          "summary": "**核心一句**：...",
+          "session_dict": { /* parse_sessions._session_to_dict() 的完整输出，含 cached_summary */ },
           "generated_at": "2026-04-27T10:00:00+08:00"
         }
       }
     }
+
+设计：
+- 脚本侧（parse_sessions.py）通过 backfill_session_dicts() 在 list 收尾批量回填 entry.session_dict。
+- AI 侧通过 cache_summary.py --bulk 把现场生成的"会话摘要"写到 entry.session_dict.cached_summary。
+- 旧 v1 缓存（"summaries" 而非 "entries"）读到一律视作空、强制全量重建。
 
 用法：
     cache_summary.py --project <path> --bulk <json_file>
@@ -37,26 +42,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parse_sessions import project_dir  # noqa: E402
 
 CACHE_FILENAME = ".ccsession_cache.json"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def _cache_path(project_root: Path) -> Path:
     return project_root / CACHE_FILENAME
 
 
+def _empty_cache() -> dict:
+    return {"version": CACHE_VERSION, "entries": {}}
+
+
 def load_cache(project_root: Path) -> dict:
-    """读缓存，文件不存在/损坏返回空骨架。"""
+    """读缓存。文件不存在 / 损坏 / 版本不符 → 返回空骨架。"""
     p = _cache_path(project_root)
     if not p.is_file():
-        return {"version": CACHE_VERSION, "summaries": {}}
+        return _empty_cache()
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or not isinstance(data.get("summaries"), dict):
-            return {"version": CACHE_VERSION, "summaries": {}}
-        data.setdefault("version", CACHE_VERSION)
-        return data
     except (json.JSONDecodeError, OSError):
-        return {"version": CACHE_VERSION, "summaries": {}}
+        return _empty_cache()
+    if not isinstance(data, dict):
+        return _empty_cache()
+    if data.get("version") != CACHE_VERSION:
+        # v1 或未来版本 → 强制全量重建
+        return _empty_cache()
+    entries = data.get("entries")
+    if not isinstance(entries, dict):
+        return _empty_cache()
+    return data
 
 
 def save_cache(project_root: Path, data: dict) -> None:
@@ -69,7 +83,6 @@ def save_cache(project_root: Path, data: dict) -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, p)
     except Exception:
-        # 失败时清理临时文件
         try:
             os.unlink(tmp)
         except OSError:
@@ -81,21 +94,16 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def _stat_jsonl(project_root: Path, session_id: str) -> tuple[float, int] | None:
-    """返回对应 jsonl 的 (mtime, size)；不存在返回 None。"""
-    jsonl = project_root / f"{session_id}.jsonl"
-    if not jsonl.is_file():
-        return None
-    st = jsonl.stat()
-    return (st.st_mtime, st.st_size)
-
-
 def write_entries(project_root: Path, items: dict[str, str]) -> tuple[int, list[str]]:
-    """批量写入。返回 (写入成功条数, 跳过的 sessionId 列表)。"""
+    """AI 摘要回写：items 是 {sid: summary_text}；只更新已有 entry 的 cached_summary。
+
+    entry 不存在的 sid 一律 skipped——它们要么是 list 还没把 session_dict 写进缓存的罕见竞态，
+    要么 jsonl 已被删除。两种情况都不应自动创建残缺 entry。
+    """
     if not items:
         return 0, []
     cache = load_cache(project_root)
-    summaries: dict = cache["summaries"]
+    entries: dict = cache["entries"]
     written = 0
     skipped: list[str] = []
     now = _iso_now()
@@ -103,21 +111,45 @@ def write_entries(project_root: Path, items: dict[str, str]) -> tuple[int, list[
         if not isinstance(summary, str) or not summary.strip():
             skipped.append(sid)
             continue
-        st = _stat_jsonl(project_root, sid)
-        if st is None:
+        entry = entries.get(sid)
+        if not isinstance(entry, dict):
             skipped.append(sid)
             continue
-        mtime, size = st
-        summaries[sid] = {
-            "mtime": mtime,
-            "size": size,
-            "summary": summary,
-            "generated_at": now,
-        }
+        sdict = entry.get("session_dict")
+        if not isinstance(sdict, dict):
+            skipped.append(sid)
+            continue
+        sdict["cached_summary"] = summary
+        entry["generated_at"] = now
         written += 1
     if written:
         save_cache(project_root, cache)
     return written, skipped
+
+
+def backfill_session_dicts(project_root: Path, items: dict[str, dict]) -> int:
+    """脚本侧批量回填：items 是 {sid: {"mtime", "size", "session_dict"}}。
+
+    始终全量替换 entries[sid]——cache_lookup 命中要求 mtime+size 一致，
+    所以 backfill 触发时旧 entry 必然已 stale，不保留旧 cached_summary。
+    """
+    if not items:
+        return 0
+    cache = load_cache(project_root)
+    entries: dict = cache["entries"]
+    now = _iso_now()
+    for sid, item in items.items():
+        sdict = item.get("session_dict")
+        if not isinstance(sdict, dict):
+            continue
+        entries[sid] = {
+            "mtime": item["mtime"],
+            "size": item["size"],
+            "session_dict": sdict,
+            "generated_at": now,
+        }
+    save_cache(project_root, cache)
+    return len(items)
 
 
 def purge_entry(project_root: Path, session_id: str) -> bool:
@@ -126,10 +158,10 @@ def purge_entry(project_root: Path, session_id: str) -> bool:
     if not p.is_file():
         return False
     cache = load_cache(project_root)
-    summaries: dict = cache["summaries"]
-    if session_id not in summaries:
+    entries: dict = cache["entries"]
+    if session_id not in entries:
         return False
-    del summaries[session_id]
+    del entries[session_id]
     save_cache(project_root, cache)
     return True
 
@@ -152,7 +184,7 @@ def cmd_bulk(args: argparse.Namespace) -> int:
         print(f"项目目录不存在：{project_root}", file=sys.stderr)
         return 1
     written, skipped = write_entries(project_root, items)
-    print(f"✅ 写入缓存 {written} 条；跳过 {len(skipped)} 条（无对应 jsonl 或摘要为空）")
+    print(f"✅ 写入缓存 {written} 条；跳过 {len(skipped)} 条（entry 不存在 / 摘要为空）")
     if skipped:
         for sid in skipped:
             print(f"  - 跳过：{sid}")
@@ -176,7 +208,7 @@ def cmd_single(args: argparse.Namespace) -> int:
     if written:
         print(f"✅ 已缓存 {args.session} 的摘要")
         return 0
-    print(f"⚠️  未写入：{args.session}（无对应 jsonl 或摘要为空）", file=sys.stderr)
+    print(f"⚠️  未写入：{args.session}（entry 不存在或摘要为空；先跑一次 list 让脚本把 session_dict 写进缓存）", file=sys.stderr)
     return 1
 
 
