@@ -4,15 +4,12 @@
 
 ## 功能
 
-- **列表**：表格展示所有会话，包含会话ID、模型、时间、会话摘要、首个问题、最后提示、AI 执行摘要、文件编辑、Subagent、Token 用量等
-- **详情**：单行摘要 + API 错误（如有）+ 本会话提交 + 文件编辑 + Subagent + AI 执行步骤
-- **会话摘要流水线（事实优先，AI 综合）**：脚本从 jsonl 抽 `last_prompt`、用 `git log --since/--until` 抽本会话期间 cwd 的 commits（最权威信号）、`isCompactSummary` 行抽 `/compact` 留下的前序会话压缩；AI 按 SKILL.md 中"会话摘要 Prompt 模板"综合 `commits → last_prompt → 首末问题 → raw_summary` 生成一句中文摘要，**不限字数**，要求包含所有关键产出或核心意图
-- **持久化缓存（schema v2）**：`.ccsession_cache.json` 缓存**完整 session_dict**——命中时脚本根本不调 `aggregate()`（不读 jsonl、不跑 `git log`、不扫 subagent 目录），活跃项目第二次跑 list 脚本侧成本压成 0；AI 摘要层独立维护，cached_summary 经 `cache_summary.py --bulk` 写回；本机 new-api 10 会话 cold 228ms → warm 67ms（≈3.4x）
-- **删除**：两步确认删除会话 `.jsonl` 与该会话独有的同名 sessionId 子目录（subagent + tool-results 缓存），项目级共享目录（`memory/`、`todos/`、`shellsnapshots/`、`.ccsession_cache.json`）红线保留；附 `clean-orphan-dirs` 子命令清理历史遗留的孤儿子目录
-- **排序**：列表支持按开始时间、结束时间、轮次、时长排序
+- **列表 / 详情**：表格展示所有会话（会话ID / 模型 / 时间 / 会话摘要 / 首末提示 / AI 执行摘要 / 文件编辑 / Subagent / Token 用量），并发聚合 + 持久化缓存（活跃项目第二次跑 list 脚本侧成本压成 0）；详情含 API 错误 / commits / 文件编辑 / Subagent 子表格 / 执行步骤
+- **会话摘要**：事实优先、AI 综合——脚本抽 `git log` commits + `last_prompt` + `/compact` 压缩，AI 按 SKILL.md Prompt 模板生成不限字数中文摘要；摘要持久化到 `.ccsession_cache.json` 复用
+- **删除**：两步确认删 `.jsonl` + 该会话独有的同名 sessionId 子目录；项目级共享目录（`memory/` `todos/` `shellsnapshots/` `.ccsession_cache.json`）红线保留；附 `clean-orphan-dirs` 清理历史遗留
+- **孤儿子进程清理**（macOS-only）：发现 Claude Code 退出后被 launchd 接管的子进程；两步确认 + SIGTERM→5s→SIGKILL；`pgid > 1` 走 `killpg` 整组发，dev server 三层 fork 链（zsh wrapper → bun/go → 编译产物）一次到位
+- **排序**：默认 `end DESC → user_turns DESC → duration DESC` 三级倒序；`--sort` 单键回退
 - **Token 统计**：主会话 + Subagent 分开展示，支持 k/m/g 单位
-- **API 错误追踪**：统计错误次数、重试次数
-- **孤儿进程清理**：发现 Claude Code 退出后被 launchd 接管、cwd 仍在 claude 项目内的子进程；两步确认 + SIGTERM→5s→SIGKILL；session leader（pgid==pid）走 killpg 整组发信号，dev server 三层 fork 链（zsh wrapper → bun/go → 编译产物）一次到位（macOS-only）
 
 ## 结构
 
@@ -155,14 +152,10 @@ _…共 58 步，还有 55 步未展示。加_ _`--full`_ _查看全部：`/ccse
 
 | 日期 | 变更类型 | 变更描述 |
 |---|---|---|
-| 2026-04-27 | 性能优化 | 缓存升级 v2：`.ccsession_cache.json` 现在缓存**完整 session_dict**（含 tokens / tool_counts / files_edited / subagent / commits / cached_summary 等全部字段）；命中时 `parse_sessions.py` **根本不调 aggregate()**——不读 jsonl、不跑 `git log`、不扫 subagent 目录；未命中那批走并发 aggregate + 收尾批量回填；脚本侧成本压成 0（new-api 10 会话 cold 228ms → warm 67ms ≈3.4x）；旧 v1 schema 自动废弃重建；AI 摘要层维持原行为（`cache_summary.py --bulk` 只更新 entry.cached_summary） |
-| 2026-04-27 | 性能优化 | list/show AI 摘要持久化缓存（v1）：脚本读 `{project_dir}/.ccsession_cache.json`，按 `sessionId + jsonl mtime + size` 三段命中，命中则在 JSON 附 `cached_summary` 成品文本由 AI 直接塞进表格；未命中由 AI 现场生成并通过新增的 `cache_summary.py --bulk` 回写；`delete_session.py` 删 jsonl 时同步清条目；活跃项目第二次起几乎瞬时，消除多会话项目下 AI 摘要的瓶颈 |
-| 2026-04-26 | 用户体验 | list/show 表格三列排版优化：会话摘要首句加粗作小标题 + 冒号叙述；首个问题 / 最后提示用「」中文引号包裹原文，AI 总结与用户原话视觉区分 |
-| 2026-04-26 | 用户体验 | `list` 默认按 `end DESC → user_turns DESC → duration DESC` 三级倒序，最近活跃 + 高互动 + 长时段会话排前面；`--sort` 显式传值时回退单键模式，与 `--desc` 配合 |
-| 2026-04-26 | bug 修复 | `delete` 连带删除同名 sessionId 子目录（含该会话独有的 `subagents/` 与 `tool-results/`），避免 subagent / tool-results 残留为孤儿数据；新增 `clean-orphan-dirs` 子命令清理历史遗留；安全断言三道（UUID 正则 + 父目录 + 同名）防误伤项目级共享目录 |
-| 2026-04-26 | 性能优化 | summary 模式默认线程池并发聚合（每个会话独立 IO + git log 子进程），新增 `--workers` 参数（0=自动 `min(8, cpu)`、1=串行）；本机 10 个会话实测 0.31s → 0.20s |
-| 2026-04-26 | 功能精修 | 会话摘要不限字数、SKILL.md 改写为 Prompt 模板；`first_question` / `last_prompt` 不截断；恢复 Subagent 子表格；`raw_summary` 改从 `type==user + isCompactSummary` 抽取（即 `/compact` 留下的前序压缩） |
-| 2026-04-26 | 重构 | 会话摘要改为"事实优先"流水线：脚本承担事实抽取（git commits、last-prompt），AI 综合生成；JSON 字段精简（删 `all_questions` / `question_modes` / `api_error_types` 等冗余） |
-| 2026-04-25 | 新功能 | `procs` / `kill` 子命令：发现并清理 Claude Code 退出后留下的孤儿子进程（pgid > 1 走 killpg 整组发，dev server 三层 fork 链一次到位） |
-| 2026-04-25 | 功能调整 | list/show 摘要表格新增「最后问题 / 最后提示」列 |
+| 2026-04-27 | 文档 | **三文件分工 + 拆引用**：CLAUDE.md / SKILL.md / README.md 按"权威决策 / 运行指令 / 用户面向"分工去重；`session_schema.md` 修正过期信息（路径编码补 `_` `.` 转 `-`、token 去重事实修正）+ 补充 `isCompactSummary` / `last-prompt` / subagent 目录布局 / `apiErrorStatus` 等字段；新增 `references/orphan_render.md` 收纳 procs/kill 表格规范，SKILL.md 主体 procs/kill 段从 ~40 行精简为 ~10 行骨架（list 路径不再加载孤儿渲染规范进 context） |
+| 2026-04-27 | 性能优化 | **持久化缓存（schema v2）**：`.ccsession_cache.json` 缓存完整 session_dict（含 tokens / tool_counts / files_edited / subagent / commits / cached_summary 等），命中时脚本**不调 `aggregate()`**——不读 jsonl、不跑 `git log`、不扫 subagent 目录；AI 摘要层独立维护（`cache_summary.py --bulk` 写回）；`delete` 时同步清条目；本机 new-api 10 会话 cold 228ms → warm 67ms（≈3.4x）|
+| 2026-04-26 | 重构 + 精修 | **会话摘要流水线** 改为"事实优先，AI 综合"：脚本抽 git commits（`git log --since/--until`）+ `isCompactSummary` 行的 `/compact` 压缩 + `last_prompt`，AI 按 SKILL.md Prompt 模板综合生成；不限字数；首问 / 最后提示不截断；恢复 Subagent 子表格 |
+| 2026-04-26 | 用户体验 | **list 排版与排序**：表格三列（会话摘要 / 首个问题 / 最后提示）粗体小标题 + 「」中文引号区分 AI 总结 vs 用户原话；默认按 `end DESC → user_turns DESC → duration DESC` 三级排序；`--sort` 显式传值回退单键模式 |
+| 2026-04-26 | 性能 + 删除流程 | summary 模式 `ThreadPoolExecutor` 并发聚合（`--workers` 控制）；`delete` 连带删同名 sessionId 子目录（subagents + tool-results），新增 `clean-orphan-dirs` 子命令；三道安全断言（UUID 正则 + 父目录 + 同名）防误伤共享目录 |
+| 2026-04-25 | 新功能 | **`procs` / `kill` 孤儿子进程清理**（macOS-only）：判定 ppid=1 + cwd 在 claude 项目内 + 非 live claude 子孙；`pgid > 1` 走 `killpg` 整组发处理 zsh wrapper → bun/go → go-build 三层 fork 链；list/show 表格同期新增「最后问题 / 最后提示」列 |
 | 2026-04-19 | 初始版本 | 首发 ccsession Skill：list / show / delete 三个子命令，jsonl 解析、Token 统计（含 subagent）、API 错误追踪、文件编辑追踪 |

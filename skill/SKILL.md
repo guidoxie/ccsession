@@ -156,70 +156,32 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cache_summary.py"   --project <路径> --bu
 4. 仅当用户明确肯定时，加 `--force` 重新调用。
 5. 删除范围与 delete 同——只动 UUID 命名的子目录，绝不触碰共享目录。
 
-### `/ccsession procs` 执行流程
+### `/ccsession procs`
 
-1. 调 `find_orphans.py --mode list --format json`，获取孤儿进程列表。
-2. 解析返回的 JSON：`scope.live_claude_pids`（活着的 claude PID）、`orphans[]`（孤儿明细）、`total`。
-3. 渲染表格（见下方表格行格式）。
-4. 列表为空时：明确告知「未发现孤儿进程」，并简述判定规则（ppid=1 + cwd 在 claude 项目内 + 非 live claude 子孙）。
-5. 列表非空时：表格底部给出「清理示例：`/ccsession kill <pid>`（多个用逗号分隔）」。
-
-#### 孤儿进程表格格式
-
-| 列 | 数据来源 | 格式 |
-|---|---|---|
-| PID | `pid` | 原值 |
-| pgid | `pgid` | 原值；只要 `pgid > 1`（自己的独立进程组），kill 都会走 killpg 整组发 |
-| 命令 | `command` | 截断 60 字符，超出加 `…`；用反引号包裹 |
-| cwd | `cwd` | 原值；用反引号包裹 |
-| 项目 | `project` | 项目根（非 cwd）；标注 `(当前)` 当 `is_current_project=true` |
-| 启动 | `started` | `YYYY-MM-DD HH:MM:SS` |
-| 已运行 | `elapsed` | 原值（ps 给的格式，如 `04-18:43:42` 表示 4 天 18 小时） |
-| RSS | `rss_mb` | `{x.x} MB`（值已是 MB） |
-| 子孙 | `descendants` | `{N} 个`；非空时在主行下用缩进列出每条 `└─ pid · command`（典型场景：zsh wrapper → bun/go → go-build/main 这种三层链） |
+1. 调 `find_orphans.py --mode list --format json`。
+2. **Read `${CLAUDE_SKILL_DIR}/references/orphan_render.md`** 获取表格列、字段映射、空态文案。
+3. 按 references 渲染表格输出。
 
 ### `/ccsession kill <pid>[,<pid>...]`
 
-1. **先**调不带 `--force` 的 `find_orphans.py --mode kill --pids <ids>`，获得预览 JSON（`preview: true`，`targets[]`，`skipped[]`）和 exit code 2。
-2. 渲染预览：列出 `targets`（即将终止的进程）和 `skipped`（无法处理的 PID 及原因）；如果 `target.descendants` 非空，提醒用户该 PID 实际是 fork 链根（zsh wrapper），整组 SIGTERM 会一并清掉子孙。
-3. **必须**明文询问「确认终止以上 N 个进程？(yes / no)」，并提示策略「先 SIGTERM 等 5 秒，残留再 SIGKILL；自己的独立进程组（pgid > 1）走 killpg 整组发信号，dev server 三层 fork 链一次到位」。
-4. 仅当用户明确肯定（`yes` / `y` / `确认` 等）时，加 `--force` 重新调用。
-5. 渲染最终结果：`killed[]`（每条含 `method`：SIGTERM / SIGKILL / SIGTERM_late / SIGKILL_failed / already_dead / permission_denied；`use_pgroup`：是否走 killpg；`elapsed_ms` 总耗时；`alive` 是否仍在）；`still_alive[]`（未能终止的）；`skipped[]`。
-6. 即使 `targets` 为空也要走完两步流程（脚本会返回 exit 2 + 空 targets），向用户确认无可操作后退出。
-
-#### kill 结果表格格式
-
-| 列 | 数据来源 | 格式 |
-|---|---|---|
-| PID | `killed[].pid` | 原值 |
-| 范围 | `killed[].use_pgroup` | `进程组` / `单 PID` |
-| 命令 | `killed[].command` | 截断 60 字符 |
-| 方式 | `killed[].method` | 原值（SIGTERM / SIGKILL / 等） |
-| 耗时 | `killed[].elapsed_ms` | `{ms} ms` |
-| 状态 | `killed[].alive` | `✅ 已退出` / `⚠️ 仍在运行` |
+1. **先**调不带 `--force` 的 `find_orphans.py --mode kill --pids <ids>`，获得预览（`preview: true` + exit 2）。
+2. **Read `${CLAUDE_SKILL_DIR}/references/orphan_render.md`** 获取 kill 渲染规范 + 整组 SIGTERM 提示文案。
+3. 渲染预览，明文询问「确认终止以上 N 个进程？(yes / no)」。
+4. 仅当用户明确肯定（`yes` / `y` / `确认` 等）时加 `--force` 重新调用。
+5. 渲染最终结果（`killed[]` / `still_alive[]` / `skipped[]` 三段，参考 references）。
 
 ---
 
-## 持久化缓存（list/show 共用，schema v2）
+## 持久化缓存：AI 怎么用 `cached_summary`
 
-`{project_dir}/.ccsession_cache.json` 缓存**完整 session_dict**——含 tokens / tool_counts / files_edited / subagents / commits / first_question / last_prompt / cached_summary 等全部字段。
+脚本层缓存对 AI 透明（命中即跳过 `aggregate()`，不感知）。AI 仅需关心 JSON 中 `cached_summary` 字段：
 
-**命中规则**：`sessionId + jsonl mtime + jsonl size` 三段一致即命中。命中后脚本**根本不调 `aggregate()`**——不读 jsonl、不跑 `git log`、不扫 subagent 目录；直接把缓存里的 session_dict 排序输出。
+- **非空** → 已是带粗体首句的成品文本，**逐字塞进表格、不再加工**。
+- **为空** → 按下方 Prompt 模板现场生成；同时把 `(sessionId, 摘要文本)` 收集到"待回写"映射；收尾通过 `cache_summary.py --bulk <临时JSON>` 回写。
 
-**两层缓存**：
+回写临时 JSON 形如 `{"<sessionId>": "<摘要文本>"}`；只在本次有新生成才需回写。回写后删除临时文件。
 
-1. **Session-dict 层**（`parse_sessions.py` 自动维护）：list 时分流命中 / 未命中，未命中那批走并发 `aggregate()`，**收尾批量** `backfill_session_dicts()` 写回 entry。脚本侧成本压成 0（命中场景）。
-2. **AI 摘要层**（AI 维护）：脚本不会自己生成"会话摘要"；命中 entry 但 `cached_summary` 为空时，AI 按下方 Prompt 模板现场生成 + 通过 `cache_summary.py --bulk` 单独回写到 `entries.<sid>.session_dict.cached_summary`。
-
-**回写约定**（仅 AI 摘要层）：临时 JSON 形如 `{"<sessionId>": "<摘要文本>"}`；`cache_summary.py --bulk` 只更新已有 entry 的 `cached_summary` 字段，entry 不存在时一律 skip（脚本会在 list 收尾自动建 entry，所以这种情况罕见）。回写后删除临时文件。
-
-**缓存淘汰**：
-- 单条失效：jsonl mtime/size 与 entry 不一致 → cache miss → 触发 `aggregate()` + 全量替换 entry。
-- 全量失效：cache 文件 `version != 2`、文件损坏、`entries` 形状不对 → 一律视作空缓存重建。
-- 删除会话：`delete_session.py` 删 jsonl 时同步调 `cache_summary.purge_entry()` 清条目。
-- **绝不在 list 路径里清孤儿条目**（避免读路径写副作用；孤儿 entry 在 jsonl 重新出现或 delete 时自然处理）。
-
-**为什么不缓存 markdown 行**：AI 必须把表格 emit 在文本回复里（Bash stdout 在 Claude Code 里渲染成 monospace 代码块、不变真表格），row markdown 缓存只省 AI 思考成本、不省字符 emission；且 SKILL.md 格式变更需要 render_version 全量失效，性价比低。
+缓存机制设计动机、淘汰规则、为什么不缓存 markdown 行等见 `CLAUDE.md`。
 
 ## 会话摘要 Prompt 模板
 
@@ -262,4 +224,5 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cache_summary.py"   --project <路径> --bu
 
 ## 参考
 
-- `${CLAUDE_SKILL_DIR}/references/session_schema.md` — Claude Code 会话 jsonl 字段速查。
+- `${CLAUDE_SKILL_DIR}/references/session_schema.md` — Claude Code 会话 jsonl 字段速查（路径编码 / 行类型 / token 去重 / isCompactSummary / subagent 目录布局 等）。
+- `${CLAUDE_SKILL_DIR}/references/orphan_render.md` — procs / kill 表格规范与字段速查（Read once on procs/kill invocations）。
