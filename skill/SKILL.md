@@ -63,9 +63,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/find_orphans.py"    --project <路径> --mo
 | 会话ID | `session_id` | 前 8 位 |
 | 模型 | `models` | 逗号拼接（如 `claude-opus-4-7, glm-5.1`） |
 | 时间 | `start` `end` `duration` `user_turns` | `{start本地时间} → {end本地时间} · {duration} · {turns} 轮` |
-| 会话摘要 | `raw_summary` / `commits` / `last_prompt` / `first_question` / `tool_counts` → **AI 综合** | 一句中文，简明扼要包含所有关键内容；不限字数；详见下方"会话摘要 Prompt 模板" |
-| 首个问题 | `first_question` | 原样不截断（管道符 `\|` 转义、换行替空格） |
-| 最后提示 | `last_prompt`（缺失时回退 `last_question`） | 原样不截断（同上） |
+| 会话摘要 | `raw_summary` / `commits` / `last_prompt` / `first_question` / `tool_counts` → **AI 综合** | 形如 `**{核心一句}**：{展开叙述}`——首句加粗作小标题（≤30 字），冒号后接详细叙述（不限字数，多产出用 `；` 或 `、` 分句，不要用 `<br>`）。详见下方"会话摘要 Prompt 模板" |
+| 首个问题 | `first_question` | `「{原文}」`——中文引号包裹原文，与摘要的总结性陈述视觉区分；不截断、管道符 `\|` 转义、换行替空格 |
+| 最后提示 | `last_prompt`（缺失时回退 `last_question`） | `「{原文}」`——同上 |
 | AI 执行摘要 | `tool_counts` | 按次数降序：`Edit×27 / Read×24 / Bash×23` |
 | 文件编辑 | `files_edited` | `{N} 个文件`（N 为 `len(files_edited)`）；无编辑时显示 `-` |
 | Subagent | `subagents` `subagent_count` `subagent_tokens` | 列表行：`{N} 个 agent`（详细子表格在 show 段展示）；无 subagent 时显示 `-` |
@@ -207,6 +207,11 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/find_orphans.py"    --project <路径> --mo
 > 5. `tool_counts`：工具调用次数分布，用来判断这是"诊断型"还是"实施型"会话。
 >
 > **输出**：一句中文，简明扼要、**包含所有关键产出或核心意图**，不限字数。
+>
+> **格式**：以 `**{核心一句}**：` 开头作粗体小标题（≤30 字、抓住主旨），冒号后接展开叙述（不限字数，多个产出用 `；` 或 `、` 分句，不要用 `<br>` 强制换行——会撑高单元格破坏表格紧凑感）。例如：
+> ```
+> **重构会话摘要为事实优先**：5 次提交完成会话摘要、删除流程、list 排序的全套精修；涵盖重构 9a07432、精修 f8bdd9e、性能 d103c07、bug 修复 b688e00、体验 dbc8b24。
+> ```
 >
 > **构思路径**：
 > - 如果 `commits` 非空 → 主信号必须来自 commit subjects（多个 commit 合并叙述）。`raw_summary` / `last_prompt` 仅作背景理解。
