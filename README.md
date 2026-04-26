@@ -1,6 +1,6 @@
 # ccsession
 
-分析 Claude Code 项目会话历史的 Skill：列表、详情、Token 统计、删除。
+分析 Claude Code 项目会话历史的 Skill：列表、详情、Token 统计、删除；以及发现并清理 Claude Code 退出后留下的孤儿子进程。
 
 ## 功能
 
@@ -10,6 +10,7 @@
 - **排序**：列表支持按开始时间、结束时间、轮次、时长排序
 - **Token 统计**：主会话 + Subagent 分开展示，支持 k/m/g 单位
 - **API 错误追踪**：统计错误次数、重试次数和等待时间
+- **孤儿进程清理**：发现 Claude Code 退出后被 launchd 接管、cwd 仍在 claude 项目内的子进程；两步确认 + SIGTERM→5s→SIGKILL；session leader（pgid==pid）走 killpg 整组发信号，dev server 三层 fork 链（zsh wrapper → bun/go → 编译产物）一次到位（macOS-only）
 
 ## 结构
 
@@ -21,7 +22,8 @@ ccsession/
     ├── SKILL.md              # Skill 定义（user-invocable）+ 渲染规范
     ├── scripts/
     │   ├── parse_sessions.py # 解析 JSONL，输出 JSON/Markdown
-    │   └── delete_session.py # 两步确认删除
+    │   ├── delete_session.py # 两步确认删除
+    │   └── find_orphans.py   # 发现 / 清理 claude 退出后的孤儿子进程
     └── references/
         └── session_schema.md # JSONL 字段速查
 ```
@@ -38,18 +40,23 @@ ln -s /path/to/ccsession/skill ~/.claude/skills/ccsession
 
 ### 通过 Skill 调用
 
-| 命令                                   | 说明               |
-| ------------------------------------ | ---------------- |
-| `/ccsession list [--project <path>]` | 表格列出所有会话         |
-| `/ccsession show <sessionId>`        | 会话详情（默认展示前 3 步）  |
-| `/ccsession show <sessionId> --full` | 会话详情（展示全部步骤）     |
-| `/ccsession delete <sessionId>`      | 删除会话 .jsonl（需确认） |
+| 命令                                   | 说明                              |
+| ------------------------------------ | ------------------------------- |
+| `/ccsession list [--project <path>]` | 表格列出所有会话                        |
+| `/ccsession show <sessionId>`        | 会话详情（默认展示前 3 步）                 |
+| `/ccsession show <sessionId> --full` | 会话详情（展示全部步骤）                    |
+| `/ccsession delete <sessionId>`      | 删除会话 .jsonl（需确认）                |
+| `/ccsession procs`                   | 列出 Claude Code 退出后的孤儿子进程        |
+| `/ccsession kill <pid>[,<pid>...]`   | 清理孤儿进程（两步确认；SIGTERM→5s→SIGKILL） |
 
-`--project` 缺省时使用当前工作目录。`<sessionId>` 支持完整 UUID 或前缀匹配。
+`--project` 缺省时使用当前工作目录。`<sessionId>` 支持完整 UUID 或前缀匹配。`<pid>` 必须是完整数字。
 
-**路径编码规则**：项目路径中的 `/` 和 `_` 会被替换为 `-`，用于匹配 `~/.claude/projects/` 下的目录名。例如：
+**孤儿进程判定（同时满足）**：(1) `ppid=1`（父进程已死，被 launchd 接管）；(2) `cwd` 落在 `~/.claude/projects/` 注册的项目目录内；(3) 不是任何 live claude 进程的子孙。每条孤儿同时附带 `descendants` 字段（当前快照的 ppid 链子孙），kill 默认对 session leader 走 `os.killpg(pgid, SIG)` 整组发信号——避免「杀掉 zsh 外壳后 bun/go 二代孤儿暴露」的级联问题。仅支持 macOS（依赖 `ps` `lsof`）。
+
+**路径编码规则**：项目路径中的 `/`、`_`、`.` 都会被替换为 `-`，用于匹配 `~/.claude/projects/` 下的目录名。例如：
 - `/home/user/my_project` → `-home-user-my-project`
 - `/home/user/project/my_app` → `-home-user-project-my-app`
+- `/Users/foo/.claude` → `-Users-foo--claude`（`.` 也会被压成 `-`）
 
 ### 直接运行脚本
 
@@ -68,6 +75,13 @@ python3 skill/scripts/parse_sessions.py --project /path/to/project \
 # 删除
 python3 skill/scripts/delete_session.py --project <path> --session <id>          # 预览
 python3 skill/scripts/delete_session.py --project <path> --session <id> --force  # 执行
+
+# 孤儿进程：列表
+python3 skill/scripts/find_orphans.py --project <path> --mode list --format json
+
+# 孤儿进程：终止（两步确认）
+python3 skill/scripts/find_orphans.py --project <path> --mode kill --pids <p1>,<p2> --format json          # 预览
+python3 skill/scripts/find_orphans.py --project <path> --mode kill --pids <p1>,<p2> --format json --force  # 执行
 ```
 
 ## 依赖

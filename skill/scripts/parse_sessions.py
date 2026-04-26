@@ -18,8 +18,9 @@ CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 
 def encode_project_path(abs_path: str) -> str:
+    # Claude Code 实际编码会把 `/`、`_`、`.` 都压成 `-`（比如 /Users/foo/.claude → -Users-foo--claude）
     p = Path(abs_path).expanduser().resolve()
-    return str(p).replace("/", "-").replace("_", "-")
+    return str(p).replace("/", "-").replace("_", "-").replace(".", "-")
 
 
 def project_dir(abs_path: str) -> Path:

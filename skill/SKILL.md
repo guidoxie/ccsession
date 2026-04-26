@@ -1,14 +1,14 @@
 ---
 name: ccsession
-description: "分析某个项目目录下的所有 Claude Code 历史会话：列表、详情、删除、token 汇总。Use when user asks to list/inspect/summarize/delete Claude Code sessions for a project (e.g. /ccsession list, /ccsession show <id>, /ccsession delete <id>). Do NOT load for: app user sessions, login state, unrelated file analysis."
+description: "分析某个项目目录下的所有 Claude Code 历史会话：列表、详情、删除、token 汇总；以及发现并清理 Claude Code 退出后留下的孤儿子进程。Use when user asks to list/inspect/summarize/delete Claude Code sessions for a project (e.g. /ccsession list, /ccsession show <id>, /ccsession delete <id>), OR to find/kill orphan processes left behind after Claude Code exited (e.g. /ccsession procs, /ccsession kill <pid>). Do NOT load for: app user sessions, login state, unrelated file analysis."
 allowed-tools: ["Bash", "Read"]
 user-invocable: true
-argument-hint: "[list|show|delete] [--project <path>] [<sessionId>]"
+argument-hint: "[list|show|delete|procs|kill] [--project <path>] [<sessionId>|<pid>[,<pid>...]]"
 ---
 
 # ccsession
 
-分析某个项目文件夹下所有 Claude Code 会话。数据源为 `~/.claude/projects/{编码路径}/*.jsonl`（编码规则：项目绝对路径的 `/` 全部替换为 `-`）。
+分析某个项目文件夹下所有 Claude Code 会话；并发现 / 清理 Claude Code 退出后留下的孤儿子进程（含 dev server 多层 fork 链整组优雅退出）。会话数据源为 `~/.claude/projects/{编码路径}/*.jsonl`（编码规则：项目绝对路径中的 `/`、`_`、`.` 全部替换为 `-`）。
 
 ## 子命令
 
@@ -18,8 +18,10 @@ argument-hint: "[list|show|delete] [--project <path>] [<sessionId>]"
 | `/ccsession show <sessionId>` | 详情：单行摘要表 + 用户提问 + 前 3 步 |
 | `/ccsession show <sessionId> --full` | 详情：单行摘要表 + 用户提问 + 全部步骤 |
 | `/ccsession delete <sessionId>` | 删除某条会话的 .jsonl（需用户确认） |
+| `/ccsession procs` | 列出 Claude Code 退出后留下的孤儿子进程 |
+| `/ccsession kill <pid>[,<pid>...]` | 清理指定孤儿进程（两步确认；SIGTERM→5s→SIGKILL） |
 
-`--project` 缺省时使用当前 `$PWD`。`<sessionId>` 可以是完整 UUID 或前缀。
+`--project` 缺省时使用当前 `$PWD`。`<sessionId>` 可以是完整 UUID 或前缀。`<pid>` 必须是完整数字。
 
 ## 调用脚本
 
@@ -30,6 +32,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/parse_sessions.py" --project <路径> --mod
 python3 "${CLAUDE_SKILL_DIR}/scripts/parse_sessions.py" --project <路径> --mode detail --session <id> --format json --full
 python3 "${CLAUDE_SKILL_DIR}/scripts/delete_session.py"  --project <路径> --session <id>          # 仅预览
 python3 "${CLAUDE_SKILL_DIR}/scripts/delete_session.py"  --project <路径> --session <id> --force  # 实际删除
+python3 "${CLAUDE_SKILL_DIR}/scripts/find_orphans.py"    --project <路径> --mode list --format json
+python3 "${CLAUDE_SKILL_DIR}/scripts/find_orphans.py"    --project <路径> --mode kill --pids <ids> --format json          # 仅预览
+python3 "${CLAUDE_SKILL_DIR}/scripts/find_orphans.py"    --project <路径> --mode kill --pids <ids> --format json --force  # 实际终止
 ```
 
 脚本只依赖 Python 3 标准库，无第三方包。
@@ -130,6 +135,48 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/delete_session.py"  --project <路径> --se
 2. 把概要展示给用户，**必须**明文询问「确认永久删除？(yes / no)」。
 3. 仅当用户回复明确肯定（`yes` / `y` / `确认` 等）时，再加 `--force` 重新调用。
 4. 任何情况下**只删除目标 `.jsonl`**，绝不触碰同目录下其它文件或子目录（如 `memory/`、`todos/`）。
+
+### `/ccsession procs` 执行流程
+
+1. 调 `find_orphans.py --mode list --format json`，获取孤儿进程列表。
+2. 解析返回的 JSON：`scope.live_claude_pids`（活着的 claude PID）、`orphans[]`（孤儿明细）、`total`。
+3. 渲染表格（见下方表格行格式）。
+4. 列表为空时：明确告知「未发现孤儿进程」，并简述判定规则（ppid=1 + cwd 在 claude 项目内 + 非 live claude 子孙）。
+5. 列表非空时：表格底部给出「清理示例：`/ccsession kill <pid>`（多个用逗号分隔）」。
+
+#### 孤儿进程表格格式
+
+| 列 | 数据来源 | 格式 |
+|---|---|---|
+| PID | `pid` | 原值 |
+| pgid | `pgid` | 原值；只要 `pgid > 1`（自己的独立进程组），kill 都会走 killpg 整组发 |
+| 命令 | `command` | 截断 60 字符，超出加 `…`；用反引号包裹 |
+| cwd | `cwd` | 原值；用反引号包裹 |
+| 项目 | `project` | 项目根（非 cwd）；标注 `(当前)` 当 `is_current_project=true` |
+| 启动 | `started` | `YYYY-MM-DD HH:MM:SS` |
+| 已运行 | `elapsed` | 原值（ps 给的格式，如 `04-18:43:42` 表示 4 天 18 小时） |
+| RSS | `rss_mb` | `{x.x} MB`（值已是 MB） |
+| 子孙 | `descendants` | `{N} 个`；非空时在主行下用缩进列出每条 `└─ pid · command`（典型场景：zsh wrapper → bun/go → go-build/main 这种三层链） |
+
+### `/ccsession kill <pid>[,<pid>...]`
+
+1. **先**调不带 `--force` 的 `find_orphans.py --mode kill --pids <ids>`，获得预览 JSON（`preview: true`，`targets[]`，`skipped[]`）和 exit code 2。
+2. 渲染预览：列出 `targets`（即将终止的进程）和 `skipped`（无法处理的 PID 及原因）；如果 `target.descendants` 非空，提醒用户该 PID 实际是 fork 链根（zsh wrapper），整组 SIGTERM 会一并清掉子孙。
+3. **必须**明文询问「确认终止以上 N 个进程？(yes / no)」，并提示策略「先 SIGTERM 等 5 秒，残留再 SIGKILL；自己的独立进程组（pgid > 1）走 killpg 整组发信号，dev server 三层 fork 链一次到位」。
+4. 仅当用户明确肯定（`yes` / `y` / `确认` 等）时，加 `--force` 重新调用。
+5. 渲染最终结果：`killed[]`（每条含 `method`：SIGTERM / SIGKILL / SIGTERM_late / SIGKILL_failed / already_dead / permission_denied；`use_pgroup`：是否走 killpg；`elapsed_ms` 总耗时；`alive` 是否仍在）；`still_alive[]`（未能终止的）；`skipped[]`。
+6. 即使 `targets` 为空也要走完两步流程（脚本会返回 exit 2 + 空 targets），向用户确认无可操作后退出。
+
+#### kill 结果表格格式
+
+| 列 | 数据来源 | 格式 |
+|---|---|---|
+| PID | `killed[].pid` | 原值 |
+| 范围 | `killed[].use_pgroup` | `进程组` / `单 PID` |
+| 命令 | `killed[].command` | 截断 60 字符 |
+| 方式 | `killed[].method` | 原值（SIGTERM / SIGKILL / 等） |
+| 耗时 | `killed[].elapsed_ms` | `{ms} ms` |
+| 状态 | `killed[].alive` | `✅ 已退出` / `⚠️ 仍在运行` |
 
 ---
 
